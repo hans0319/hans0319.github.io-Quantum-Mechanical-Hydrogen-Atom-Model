@@ -1,0 +1,193 @@
+<!DOCTYPE html> 
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>氫原子</title>
+  <style>
+    body { margin:0; background:#000; color:#fff; font-family:sans-serif; }
+    #controls { position:absolute; top:-5px; left:110px; background:rgba(0,0,0,0.6); padding:10px; border-radius:8px; z-index:10; }
+    select, button, input { margin:4px; padding:4px; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label>量子數  n: <input type="number" id="nInput" min="1" max="10" value="1"/></label>
+    <label>l: <select id="lSelect"></select></label>
+    <label>m: <select id="mSelect"></select></label>
+    <button id="showWave">確認</button><br/>
+
+    <label>眼睛位置 X: <input type="number" id="camX" value="50"/></label>
+    <label>Y: <input type="number" id="camZ" value="50"/></label>
+    <label>Z: <input type="number" id="camY" value="50"/></label>
+    <button id="updateCam">確認</button>
+  </div>
+  <canvas id="canvas"></canvas>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(50,50,50);
+    camera.lookAt(0,0,0);
+
+    const light = new THREE.PointLight(0xffffff,1);
+    light.position.set(50,50,50);
+    scene.add(light);
+
+    const axesHelper = new THREE.AxesHelper(1000);
+    scene.add(axesHelper);
+
+    let currentObj = null;
+
+    function mulberry32(a) {
+        return function() {
+            let t = a += 0x6D2B79F5;
+            t = Math.imul(t ^ t>>>15, t | 1);
+            t ^= t + Math.imul(t ^ t>>>7, t | 61);
+            return ((t ^ t>>>14) >>> 0) / 4294967296;
+        }
+    }
+
+    const nInput = document.getElementById("nInput");
+    const lSelect = document.getElementById("lSelect");
+    const mSelect = document.getElementById("mSelect");
+
+    function populateL(){
+      let n = parseInt(nInput.value);
+      if(isNaN(n) || n < 1) n = 1;
+      lSelect.innerHTML = "";
+      for(let l = 0; l <= n - 1; l++){
+        const opt = document.createElement("option");
+        opt.value = l; opt.text = l;
+        lSelect.appendChild(opt);
+      }
+      populateM();
+    }
+
+    function populateM(){
+      const l = parseInt(lSelect.value);
+      mSelect.innerHTML = "";
+      for(let m = -l; m <= l; m++){
+        const opt = document.createElement("option");
+        opt.value = m; opt.text = m;
+        mSelect.appendChild(opt);
+      }
+    }
+
+    nInput.addEventListener("input", populateL);
+    lSelect.addEventListener("change", populateM);
+    populateL();
+
+    const factorialCache = new Map();
+    function factorial(n){
+      if(n<0) return 0;
+      if(factorialCache.has(n)) return factorialCache.get(n);
+      let res=1;
+      for(let i=1;i<=n;i++) res*=i;
+      factorialCache.set(n,res);
+      return res;
+    }
+
+    function assocLegendre(l,m,x){
+      if(m<0) return Math.pow(-1,m)*(factorial(l-m)/factorial(l+m))*assocLegendre(l,-m,x);
+      if(l===m) return Math.pow(-1,m)*(2*m-1)*Math.sqrt(1-x*x);
+      if(l===m+1) return (2*m+1)*x*assocLegendre(m,m,x);
+      return ((2*l-1)*x*assocLegendre(l-1,m,x)-(l+m-1)*assocLegendre(l-2,m,x))/(l-m);
+    }
+
+    function realSphericalHarmonic(l,m,theta,phi){
+      const absM=Math.abs(m);
+      const Plm=assocLegendre(l,absM,Math.cos(theta));
+      const N=Math.sqrt((2*l+1)/(4*Math.PI)*factorial(l-absM)/factorial(l+absM));
+      if(m===0) return N*Plm;
+      else if(m>0) return Math.sqrt(2)*N*Plm*Math.cos(m*phi);
+      else return Math.sqrt(2)*N*Plm*Math.sin(absM*phi);
+    }
+
+    function generalizedLaguerre(k,a,x){
+      if(k===0) return 1;
+      if(k===1) return 1+a-x;
+      let L0=1,L1=1+a-x;
+      for(let i=2;i<=k;i++){
+        let Li=((2*(i-1)+1+a-x)*L1-((i-1)+a)*L0)/i;
+        L0=L1; L1=Li;
+      }
+      return L1;
+    }
+
+    function radialR(n,l,r){
+      const rho=2*r/n;
+      const Lval=generalizedLaguerre(n-l-1,2*l+1,rho);
+      const pre=Math.sqrt(Math.pow(2/n,3)*factorial(n-l-1)/(2*n*factorial(n+l)));
+      return pre*Math.pow(rho,l)*Math.exp(-rho/2)*Lval;
+    }
+
+    function showWaveFunction(){
+      if(currentObj){ scene.remove(currentObj); currentObj.geometry.dispose(); currentObj.material.dispose(); currentObj=null; }
+
+      const n=parseInt(nInput.value);
+      const l=parseInt(lSelect.value);
+      const m=parseInt(mSelect.value);
+
+      const geometry=new THREE.BufferGeometry();
+      const positions=[];
+
+      const dist = camera.position.length();
+      const particleNum = Math.floor(5000 * (100/dist));
+      const pointSize = Math.max(0.05, 5/dist);
+
+      const seed = n*150 + l*15 + m;
+      const random = mulberry32(seed);
+
+      for(let i=0;i<particleNum;i++){
+        const r = random()*n*5;
+        const theta = Math.acos(2*random()-1);
+        const phi = 2*Math.PI*random();
+        const R = radialR(n,l,r);
+        const Y = realSphericalHarmonic(l,m,theta,phi);
+        const pd = Math.pow(R*Y,2);
+        if(random() < pd*1000){
+          const x=r*Math.sin(theta)*Math.cos(phi);
+          const y=r*Math.sin(theta)*Math.sin(phi);
+          const z=r*Math.cos(theta);
+          positions.push(x,y,z);
+        }
+      }
+
+      geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+      const material=new THREE.PointsMaterial({color:0x00ffff,size:pointSize});
+      currentObj=new THREE.Points(geometry,material);
+      scene.add(currentObj);
+    }
+
+    document.getElementById("showWave").addEventListener("click",showWaveFunction);
+
+    document.getElementById("updateCam").addEventListener("click",()=>{
+      const x = parseFloat(document.getElementById("camX").value);
+      const y = parseFloat(document.getElementById("camY").value);
+      const z = parseFloat(document.getElementById("camZ").value);
+      camera.position.set(x,y,z);
+      camera.lookAt(0,0,0);
+    });
+
+    function animate(){
+      requestAnimationFrame(animate);
+      renderer.render(scene,camera);
+    }
+    animate();
+
+    window.addEventListener("resize",()=>{
+      camera.aspect=window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
